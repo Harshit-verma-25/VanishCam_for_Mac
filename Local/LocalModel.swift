@@ -6,13 +6,17 @@ import AppKit
 final class LocalModel: ObservableObject {
     @Published private(set) var mode: VanishMode
     @Published private(set) var status = VanishStatus()
-    @Published private(set) var meetTabs = 0
+    @Published private(set) var meetTabs = 0 {
+        didSet { updateEngine() }
+    }
 
     let sink = FrameSink()
     private let server = FrameServer()
     private let engine = VanishEngine(width: 1280, height: 720)
+    private var engineRunning = false
     private var pollTimer: Timer?
     private var terminationObserver: NSObjectProtocol?
+    private var occlusionObserver: NSObjectProtocol?
 
     init() {
         mode = engine.currentMode
@@ -25,6 +29,12 @@ final class LocalModel: ObservableObject {
         }
         server.start()
         engine.start()
+        engineRunning = true
+        occlusionObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeOcclusionStateNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.updateEngine() }
+        }
 
         pollTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.readStatus() }
@@ -40,6 +50,14 @@ final class LocalModel: ObservableObject {
     }
 
     func send(_ command: VanishCommand) { engine.handle(command) }
+
+    /// The camera only runs while a Meet tab is using it or a window of this app is on screen.
+    private func updateEngine() {
+        let needed = meetTabs > 0 || NSApp.occlusionState.contains(.visible)
+        guard needed != engineRunning else { return }
+        engineRunning = needed
+        if needed { engine.start() } else { engine.stop() }
+    }
 
     func openCameraSettings() {
         if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Camera") {

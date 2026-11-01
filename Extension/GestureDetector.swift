@@ -94,6 +94,8 @@ final class GestureDetector {
 
     func detect(in buffer: CVPixelBuffer, mode: VanishMode, now: CFTimeInterval) -> Gesture {
         let size = CGSize(width: CVPixelBufferGetWidth(buffer), height: CVPixelBufferGetHeight(buffer))
+        // Only the palms gesture needs two hands; tracking one is noticeably cheaper.
+        handRequest.maximumHandCount = mode == .naruto ? 2 : 1
         var requests: [VNRequest] = [handRequest]
         if mode == .goku { requests.append(faceRequest) }
         do {

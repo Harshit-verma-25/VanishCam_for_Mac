@@ -74,8 +74,8 @@ It has no system-wide virtual camera, so "Vanish Camera" only appears in Google 
 ```bash
 xcodebuild -downloadComponent MetalToolchain   # once; newer Xcode doesn't include the Metal compiler
 xcodegen generate
-xcodebuild -project VanishCam.xcodeproj -scheme VanishCamLocal -configuration Debug -derivedDataPath build build
-ditto build/Build/Products/Debug/VanishCamLocal.app /Applications/VanishCamLocal.app
+xcodebuild -project VanishCam.xcodeproj -scheme VanishCamLocal -configuration Release -derivedDataPath build build
+ditto build/Build/Products/Release/VanishCamLocal.app /Applications/VanishCamLocal.app
 open /Applications/VanishCamLocal.app
 ```
 

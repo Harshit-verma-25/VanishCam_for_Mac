@@ -55,6 +55,7 @@ final class VanishEngine {
     private var coverage: CVPixelBuffer?       // white where the background has actually been seen
     private var filledBuffer: CVPixelBuffer?
     private var filledBackground: CIImage?     // plate with unseen holes filled in
+    private var filledStale = false            // plate changed; refill only when someone is about to be hidden
     private var recaptureStart: CFTimeInterval?
     private var recaptureResetDone = false
     private var gestureSince: CFTimeInterval?
@@ -65,6 +66,7 @@ final class VanishEngine {
     private var snapshotLive: CIImage?
     private var snapshotMask: CIImage?
     private var snapshotBuffers: [CVPixelBuffer] = []
+    private var lastLearnable: CVPixelBuffer?  // previous tick's learnable area; both ticks must agree
     private var heldMask: CVPixelBuffer?       // last frame's mask while hidden, so a missed detection can't flash you
     private var anchor = CGRect.zero           // person bounds when they vanished (Naruto log position)
     private var smokeSeed: Float = 0
@@ -193,8 +195,12 @@ final class VanishEngine {
         let live = CIImage(cvPixelBuffer: input)
 
         let recapture = advanceRecapture(now)
-        let backgroundTick = frameIndex % 6 == 0
-        let needMask = phase != .visible || plate == nil || recapture == .capturing || backgroundTick
+        // The room changes slowly: twice a second is plenty, and it's the main cost while you're visible.
+        let backgroundTick = frameIndex % 15 == 0
+        // Fully vanished there's no animation to track, so segmenting every other frame and covering the
+        // gap with the held mask halves the biggest cost.
+        let restingHidden = phase == .vanished && heldMask != nil && frameIndex % 2 == 1
+        let needMask = (phase != .visible && !restingHidden) || plate == nil || recapture == .capturing || backgroundTick
 
         var mask: CIImage?
         var maskBuffer: CVPixelBuffer?
@@ -206,6 +212,8 @@ final class VanishEngine {
             heldMask = nil
         } else if let current = mask {
             mask = holdMask(current)
+        } else if restingHidden, let held = heldMask {
+            mask = CIImage(cvPixelBuffer: held)
         }
 
         if let mask {
@@ -214,7 +222,7 @@ final class VanishEngine {
             } else if recapture == .capturing {
                 updateBackground(live: live, mask: mask, rate: 0.35)
             } else if recapture == .none && backgroundTick {
-                updateBackground(live: live, mask: mask, rate: 0.12)
+                updateBackground(live: live, mask: mask, rate: 0.25, confirm: true)
             }
         }
 
@@ -222,7 +230,8 @@ final class VanishEngine {
             takeSnapshot(live: live, mask: mask, maskBuffer: maskBuffer)
         }
 
-        if recapture == .none && frameIndex % 2 == 0 {
+        // ~10 checks a second still gives several hits within the shortest hold time.
+        if recapture == .none && frameIndex % 3 == 0 {
             handleGesture(gestures.detect(in: input, mode: mode, now: now), now: now)
         }
 
@@ -335,9 +344,19 @@ final class VanishEngine {
         refreshFilledBackground()
     }
 
-    private func updateBackground(live: CIImage, mask: CIImage, rate: CGFloat) {
+    /// With `confirm`, a pixel is only learned if the previous tick also saw it empty, so one missed
+    /// detection can't paint you into the background (you'd never cover that spot again to fix it).
+    private func updateBackground(live: CIImage, mask: CIImage, rate: CGFloat, confirm: Bool = false) {
         guard let plate, let coverage else { return }
-        let notPerson = learnableArea(mask)
+        var notPerson = learnableArea(mask)
+        if confirm {
+            guard let current = render(notPerson) else { return }
+            defer { lastLearnable = current }
+            guard let previous = lastLearnable else { return }
+            notPerson = CIImage(cvPixelBuffer: current).applyingFilter("CIMinimumCompositing", parameters: [
+                kCIInputBackgroundImageKey: CIImage(cvPixelBuffer: previous),
+            ])
+        }
         let weight = notPerson.applyingFilter("CIColorMatrix", parameters: [
             "inputRVector": CIVector(x: rate, y: 0, z: 0, w: 0),
             "inputGVector": CIVector(x: 0, y: rate, z: 0, w: 0),
@@ -352,11 +371,13 @@ final class VanishEngine {
         ])
         if let p = render(blended) { self.plate = p }
         if let c = render(grown) { self.coverage = c }
-        refreshFilledBackground()
+        filledStale = true
+        if phase != .visible { refreshFilledBackground() }
     }
 
     private func refreshFilledBackground() {
         guard let plate, let coverage else { return }
+        filledStale = false
         let p = CIImage(cvPixelBuffer: plate)
         let c = CIImage(cvPixelBuffer: coverage)
         let premul = p.applyingFilter("CIBlendWithMask", parameters: [
@@ -381,11 +402,11 @@ final class VanishEngine {
         }
     }
 
-    /// "Background2": plates saved before the stricter learning area can hold a ghost of you, so they're not reused.
+    /// Versioned: plates saved before the stricter learning rules can hold a ghost of you, so they're not reused.
     private var storageDirectory: URL? {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
             .appendingPathComponent("VanishCam", isDirectory: true)
-            .appendingPathComponent("Background2", isDirectory: true)
+            .appendingPathComponent("Background3", isDirectory: true)
     }
 
     /// The background survives restarts, so on a normal day you can vanish without stepping out first.
@@ -438,6 +459,7 @@ final class VanishEngine {
     }
 
     private func beginVanish(_ now: CFTimeInterval) {
+        if filledStale { refreshFilledBackground() }
         phase = .vanishing(start: now)
         needsSnapshot = true
         smokeSeed = Float.random(in: 0...100)
