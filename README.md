@@ -72,6 +72,7 @@ Every build gets a unique build number automatically, so macOS swaps in the new 
 It has no system-wide virtual camera, so "Vanish Camera" only appears in Google Meet, through the Chrome extension.
 
 ```bash
+xcodebuild -downloadComponent MetalToolchain   # once; newer Xcode doesn't include the Metal compiler
 xcodegen generate
 xcodebuild -project VanishCam.xcodeproj -scheme VanishCamLocal -configuration Debug -derivedDataPath build build
 ditto build/Build/Products/Debug/VanishCamLocal.app /Applications/VanishCamLocal.app

@@ -65,6 +65,7 @@ final class VanishEngine {
     private var snapshotLive: CIImage?
     private var snapshotMask: CIImage?
     private var snapshotBuffers: [CVPixelBuffer] = []
+    private var heldMask: CVPixelBuffer?       // last frame's mask while hidden, so a missed detection can't flash you
     private var anchor = CGRect.zero           // person bounds when they vanished (Naruto log position)
     private var smokeSeed: Float = 0
     private var fallbackTimer: DispatchSourceTimer?
@@ -201,6 +202,11 @@ final class VanishEngine {
             maskBuffer = buffer
             mask = maskImage(from: buffer)
         }
+        if phase == .visible {
+            heldMask = nil
+        } else if let current = mask {
+            mask = holdMask(current)
+        }
 
         if let mask {
             if plate == nil {
@@ -253,15 +259,49 @@ final class VanishEngine {
         }
     }
 
-    /// Vision mask → full-size, slightly grown and softened so no outline of you is left behind.
+    /// Vision mask → full-size, grown and softened so no outline of you is left behind.
+    /// Low-confidence pixels (hair, edges, backlit shoulders) are boosted to fully "person".
     private func maskImage(from buffer: CVPixelBuffer) -> CIImage {
         let m = CIImage(cvPixelBuffer: buffer)
         return m.transformed(by: CGAffineTransform(scaleX: CGFloat(width) / m.extent.width,
                                                    y: CGFloat(height) / m.extent.height))
-            .applyingFilter("CIMorphologyMaximum", parameters: [kCIInputRadiusKey: 5])
+            .applyingFilter("CIColorMatrix", parameters: [
+                "inputRVector": CIVector(x: 3, y: 0, z: 0, w: 0),
+                "inputGVector": CIVector(x: 3, y: 0, z: 0, w: 0),
+                "inputBVector": CIVector(x: 3, y: 0, z: 0, w: 0),
+            ])
+            .applyingFilter("CIColorClamp")
+            .applyingFilter("CIMorphologyMaximum", parameters: [kCIInputRadiusKey: 10])
             .clampedToExtent()
-            .applyingGaussianBlur(sigma: 3)
+            .applyingGaussianBlur(sigma: 4)
             .cropped(to: extent)
+    }
+
+    /// While hidden, keeps a fading copy of earlier masks so fast moves and dropped detections stay covered.
+    private func holdMask(_ mask: CIImage) -> CIImage {
+        var held = mask
+        if let previous = heldMask {
+            let faded = CIImage(cvPixelBuffer: previous).applyingFilter("CIColorMatrix", parameters: [
+                "inputRVector": CIVector(x: 0.85, y: 0, z: 0, w: 0),
+                "inputGVector": CIVector(x: 0, y: 0.85, z: 0, w: 0),
+                "inputBVector": CIVector(x: 0, y: 0, z: 0.85, w: 0),
+            ])
+            held = mask.applyingFilter("CIMaximumCompositing", parameters: [kCIInputBackgroundImageKey: faded])
+        }
+        heldMask = render(held)
+        return heldMask.map { CIImage(cvPixelBuffer: $0) } ?? held
+    }
+
+    /// Where it's safe to learn the room: well away from anything that might be you.
+    /// Done at quarter size because the wide grow is the expensive part.
+    private func learnableArea(_ mask: CIImage) -> CIImage {
+        mask.transformed(by: CGAffineTransform(scaleX: 0.25, y: 0.25))
+            .applyingFilter("CIMorphologyMaximum", parameters: [kCIInputRadiusKey: 8])
+            .transformed(by: CGAffineTransform(scaleX: 4, y: 4))
+            .clampedToExtent()
+            .applyingGaussianBlur(sigma: 6)
+            .cropped(to: extent)
+            .applyingFilter("CIColorInvert")
     }
 
     // MARK: Background model
@@ -291,13 +331,13 @@ final class VanishEngine {
 
     private func seedBackground(live: CIImage, mask: CIImage) {
         plate = render(live)
-        coverage = render(mask.applyingFilter("CIColorInvert"))
+        coverage = render(learnableArea(mask))
         refreshFilledBackground()
     }
 
     private func updateBackground(live: CIImage, mask: CIImage, rate: CGFloat) {
         guard let plate, let coverage else { return }
-        let notPerson = mask.applyingFilter("CIColorInvert")
+        let notPerson = learnableArea(mask)
         let weight = notPerson.applyingFilter("CIColorMatrix", parameters: [
             "inputRVector": CIVector(x: rate, y: 0, z: 0, w: 0),
             "inputGVector": CIVector(x: 0, y: rate, z: 0, w: 0),
@@ -341,9 +381,11 @@ final class VanishEngine {
         }
     }
 
+    /// "Background2": plates saved before the stricter learning area can hold a ghost of you, so they're not reused.
     private var storageDirectory: URL? {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
             .appendingPathComponent("VanishCam", isDirectory: true)
+            .appendingPathComponent("Background2", isDirectory: true)
     }
 
     /// The background survives restarts, so on a normal day you can vanish without stepping out first.

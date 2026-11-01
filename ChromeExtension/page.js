@@ -1,35 +1,78 @@
 // Runs in Meet's page world. Lists "Vanish Camera" as a camera and supplies its video track.
 (() => {
-  const media = navigator.mediaDevices;
-  if (!media || typeof MediaStreamTrackGenerator === "undefined") return;
+  if (typeof MediaDevices === "undefined" || !navigator.mediaDevices) return;
+  const proto = MediaDevices.prototype;
 
-  const DEVICE_ID = "vanish-camera";
+  // Shaped like Chrome's own ids (64 hex chars), in case Meet drops ids that don't look real.
+  const DEVICE_ID = "7661" + "6e697368".repeat(7) + "6361";
   const LABEL = "Vanish Camera";
-  const GROUP_ID = "vanish-camera-group";
+  const GROUP_ID = "7661" + "6e697368".repeat(7) + "6772";
   const WIDTH = 1280;
   const HEIGHT = 720;
 
-  const realEnumerate = media.enumerateDevices.bind(media);
-  const realGetUserMedia = media.getUserMedia.bind(media);
+  const realEnumerateFn = proto.enumerateDevices;
+  const realGetUserMediaFn = proto.getUserMedia;
+  const media = navigator.mediaDevices;
+  const realEnumerate = () => realEnumerateFn.call(media);
+  const realGetUserMedia = (constraints) => realGetUserMediaFn.call(media, constraints);
 
-  const fakeDevice = {
-    deviceId: DEVICE_ID,
-    groupId: GROUP_ID,
-    kind: "videoinput",
-    label: LABEL,
-    getCapabilities: () => ({
-      deviceId: DEVICE_ID,
-      groupId: GROUP_ID,
-      width: { min: 1, max: WIDTH },
-      height: { min: 1, max: HEIGHT },
-      frameRate: { min: 1, max: 30 },
-    }),
-    toJSON() {
-      return { deviceId: DEVICE_ID, groupId: GROUP_ID, kind: "videoinput", label: LABEL };
+  // Meet filters devices with instanceof, so this inherits from InputDeviceInfo and shadows its getters.
+  const DeviceProto = typeof InputDeviceInfo !== "undefined" ? InputDeviceInfo.prototype : Object.prototype;
+  const fakeDevice = Object.create(DeviceProto, {
+    deviceId: { value: DEVICE_ID, enumerable: true },
+    groupId: { value: GROUP_ID, enumerable: true },
+    kind: { value: "videoinput", enumerable: true },
+    label: { value: LABEL, enumerable: true },
+    getCapabilities: {
+      value: () => ({
+        deviceId: DEVICE_ID,
+        groupId: GROUP_ID,
+        width: { min: 1, max: WIDTH },
+        height: { min: 1, max: HEIGHT },
+        frameRate: { min: 1, max: 30 },
+      }),
     },
+    toJSON: {
+      value: () => ({ deviceId: DEVICE_ID, groupId: GROUP_ID, kind: "videoinput", label: LABEL }),
+    },
+  });
+
+  // Patched on the prototype, so callers that reach for MediaDevices.prototype directly see it too.
+  proto.enumerateDevices = async function () {
+    const devices = await realEnumerate();
+    return devices.some((d) => d.deviceId === DEVICE_ID) ? devices : [...devices, fakeDevice];
   };
 
-  media.enumerateDevices = async () => [...(await realEnumerate()), fakeDevice];
+  // MediaStreamTrackGenerator is window-only in older Chrome and worker-only in newer builds,
+  // so fall back to a captured canvas, which every Chrome supports.
+  const makeOutput = () => {
+    if (typeof MediaStreamTrackGenerator !== "undefined") {
+      const generator = new MediaStreamTrackGenerator({ kind: "video" });
+      const writer = generator.writable.getWriter();
+      return {
+        track: generator,
+        draw: (image) => {
+          if (writer.desiredSize !== null && writer.desiredSize <= 0) return;
+          const frame = new VideoFrame(image, { timestamp: Math.round(performance.now() * 1000) });
+          writer.write(frame).catch(() => frame.close());
+        },
+        close: () => {
+          writer.close().catch(() => {});
+          generator.stop();
+        },
+      };
+    }
+    const canvas = document.createElement("canvas");
+    canvas.width = WIDTH;
+    canvas.height = HEIGHT;
+    const context = canvas.getContext("2d");
+    const track = canvas.captureStream(30).getVideoTracks()[0];
+    return {
+      track,
+      draw: (image) => context.drawImage(image, 0, 0, WIDTH, HEIGHT),
+      close: () => track.stop(),
+    };
+  };
 
   const idsIn = (value) => {
     if (value == null) return [];
@@ -49,16 +92,10 @@
   let source = null;
 
   const startSource = () => {
-    const generator = new MediaStreamTrackGenerator({ kind: "video" });
-    const writer = generator.writable.getWriter();
+    const output = makeOutput();
     const channel = new MessageChannel();
     let lastFrameAt = 0;
-
-    const write = (image) => {
-      if (writer.desiredSize !== null && writer.desiredSize <= 0) return;
-      const frame = new VideoFrame(image, { timestamp: Math.round(performance.now() * 1000) });
-      writer.write(frame).catch(() => frame.close());
-    };
+    const write = output.draw;
 
     channel.port1.onmessage = ({ data }) => {
       lastFrameAt = performance.now();
@@ -84,11 +121,10 @@
       clearInterval(placeholder);
       channel.port1.postMessage("stop");
       channel.port1.close();
-      writer.close().catch(() => {});
-      generator.stop();
+      output.close();
       source = null;
     };
-    return { generator, tracks: new Set(), stop };
+    return { generator: output.track, tracks: new Set(), stop };
   };
 
   // Makes a generator track look like a camera to Meet, which checks the settings for its device id.
@@ -118,7 +154,7 @@
     return track;
   };
 
-  media.getUserMedia = async (constraints) => {
+  proto.getUserMedia = async function (constraints) {
     if (!wantsVanish(constraints)) return realGetUserMedia(constraints);
     const stream = constraints.audio
       ? await realGetUserMedia({ audio: constraints.audio })
@@ -127,4 +163,8 @@
     stream.addTrack(decorate(source.generator.clone(), source));
     return stream;
   };
+
+  // Shows in DevTools whether the extension reached this tab.
+  console.info("[Vanish Camera] active, output:",
+    typeof MediaStreamTrackGenerator !== "undefined" ? "track generator" : "canvas");
 })();
