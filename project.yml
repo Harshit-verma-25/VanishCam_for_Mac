@@ -1,0 +1,100 @@
+# XcodeGen spec — run `xcodegen generate` in this folder to create VanishCam.xcodeproj
+# Before generating: put your Apple Developer Team ID below (Xcode → Settings → Accounts).
+# If you change the bundle identifier, keep the extension id = app id + ".CameraExtension".
+
+name: VanishCam
+options:
+  deploymentTarget:
+    macOS: "13.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    DEVELOPMENT_TEAM: "YOUR_TEAM_ID"
+    CODE_SIGN_STYLE: Automatic
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    MACOSX_DEPLOYMENT_TARGET: "13.0"
+    ENABLE_HARDENED_RUNTIME: YES
+    ENABLE_USER_SCRIPT_SANDBOXING: NO
+
+targets:
+  VanishCam:
+    type: application
+    platform: macOS
+    sources:
+      - path: App
+      - path: Shared
+    settings:
+      base:
+        PRODUCT_NAME: VanishCam
+        PRODUCT_BUNDLE_IDENTIFIER: com.harshitverma.VanishCam
+        INFOPLIST_FILE: App/Info.plist
+        CODE_SIGN_ENTITLEMENTS: App/VanishCam.entitlements
+        GENERATE_INFOPLIST_FILE: NO
+    dependencies:
+      - target: VanishCamExtension
+        embed: true
+        codeSign: true
+        copy:
+          destination: wrapper
+          subpath: Contents/Library/SystemExtensions
+    postBuildScripts:
+      # macOS only replaces an installed system extension when the build number changes,
+      # so every build gets a fresh one (runs before code signing).
+      - name: Unique build number
+        basedOnDependencyAnalysis: false
+        script: |
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $(date +%s)" "${TARGET_BUILD_DIR}/${INFOPLIST_PATH}"
+
+  VanishCamExtension:
+    type: system-extension
+    platform: macOS
+    sources:
+      - path: Extension
+      - path: Shared
+    settings:
+      base:
+        # A system extension bundle must be named after its bundle identifier.
+        PRODUCT_NAME: com.harshitverma.VanishCam.CameraExtension
+        PRODUCT_BUNDLE_IDENTIFIER: com.harshitverma.VanishCam.CameraExtension
+        INFOPLIST_FILE: Extension/Info.plist
+        CODE_SIGN_ENTITLEMENTS: Extension/VanishCamExtension.entitlements
+        GENERATE_INFOPLIST_FILE: NO
+        SKIP_INSTALL: YES
+        # Compile Effects.metal as Core Image kernels
+        MTL_COMPILER_FLAGS: -fcikernel
+        MTLLINKER_FLAGS: -cikernel
+    postBuildScripts:
+      - name: Unique build number
+        basedOnDependencyAnalysis: false
+        script: |
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $(date +%s)" "${TARGET_BUILD_DIR}/${INFOPLIST_PATH}"
+
+  # Local-only build: runs the engine inside the app, shows effects in a window, and needs no
+  # Apple account (ad-hoc signed). No virtual camera; use OBS Window Capture to reach Zoom/Meet.
+  VanishCamLocal:
+    type: application
+    platform: macOS
+    sources:
+      - path: Local
+      - path: Shared
+      - path: Extension/VanishEngine.swift
+      - path: Extension/GestureDetector.swift
+      - path: Extension/EffectKernels.swift
+      - path: Extension/CameraCapture.swift
+      - path: Extension/Effects.metal
+    settings:
+      base:
+        PRODUCT_NAME: VanishCamLocal
+        PRODUCT_BUNDLE_IDENTIFIER: com.harshitverma.VanishCamLocal
+        INFOPLIST_FILE: Local/Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        DEVELOPMENT_TEAM: ""
+        CODE_SIGN_STYLE: Manual
+        CODE_SIGN_IDENTITY: "-"
+        ENABLE_HARDENED_RUNTIME: NO
+        # Compile Effects.metal as Core Image kernels
+        MTL_COMPILER_FLAGS: -fcikernel
+        MTLLINKER_FLAGS: -cikernel
